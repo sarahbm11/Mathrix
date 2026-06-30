@@ -9,8 +9,16 @@ import 'package:path_provider/path_provider.dart';
 /// déduplique les frames quasi identiques pour limiter le nombre d'images
 /// envoyées à l'API Claude (coût des appels vision).
 class VideoFrameService {
-  /// Extrait une frame toutes les [intervalSeconds] secondes de [videoPath]
-  /// et retourne la liste des chemins de fichiers PNG générés, dans l'ordre.
+  /// Largeur maximale (px) des frames extraites. 1568px est la dimension
+  /// maximale au-delà de laquelle Claude vision redimensionne de toute
+  /// façon les images en entrée — extraire plus grand n'apporte rien et
+  /// alourdit inutilement la requête (risque de 413 "request too large"
+  /// avec plusieurs frames en pleine résolution).
+  static const _maxFrameWidth = 1568;
+
+  /// Extrait une frame toutes les [intervalSeconds] secondes de [videoPath],
+  /// redimensionnée et compressée en JPEG, et retourne la liste des chemins
+  /// de fichiers générés, dans l'ordre.
   Future<List<String>> extractFrames(
     String videoPath, {
     double intervalSeconds = 1.0,
@@ -21,10 +29,11 @@ class VideoFrameService {
     );
     await framesDir.create(recursive: true);
 
-    final outputPattern = '${framesDir.path}/frame_%05d.png';
+    final outputPattern = '${framesDir.path}/frame_%05d.jpg';
     final fps = 1 / intervalSeconds;
-    final command =
-        '-i "$videoPath" -vf fps=$fps -vsync 0 "$outputPattern"';
+    final command = '-i "$videoPath" '
+        '-vf "fps=$fps,scale=\'min($_maxFrameWidth,iw)\':-2" '
+        '-vsync 0 -q:v 4 "$outputPattern"';
 
     final session = await FFmpegKit.execute(command);
     final returnCode = await session.getReturnCode();
@@ -37,7 +46,7 @@ class VideoFrameService {
     final files = framesDir
         .listSync()
         .whereType<File>()
-        .where((f) => f.path.endsWith('.png'))
+        .where((f) => f.path.endsWith('.jpg'))
         .toList()
       ..sort((a, b) => a.path.compareTo(b.path));
 

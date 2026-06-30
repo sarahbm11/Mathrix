@@ -16,6 +16,13 @@ class ClaudeApiService {
   static const _anthropicVersion = '2023-06-01';
   static const _maxTokens = 4096;
 
+  /// Nombre maximal de frames envoyées dans une seule requête. Les frames
+  /// sont redimensionnées et compressées (cf. VideoFrameService), mais une
+  /// vidéo longue peut quand même produire beaucoup de frames retenues
+  /// après déduplication ; on découpe en lots pour ne jamais dépasser la
+  /// taille de requête maximale de l'API (erreur 413).
+  static const maxFramesPerRequest = 12;
+
   final SecureStorageService _secureStorage;
   final http.Client _client;
 
@@ -42,7 +49,41 @@ class ClaudeApiService {
   /// Envoie une liste de chemins de fichiers image (frames extraites) à
   /// Claude vision avec [systemPrompt] et [userPrompt], et retourne le
   /// texte de la réponse (transcription Markdown attendue).
+  ///
+  /// Si [framePaths] dépasse [maxFramesPerRequest], l'envoi est découpé
+  /// en plusieurs requêtes séquentielles (les pages d'un même cahier
+  /// défilant dans l'ordre, chaque lot couvre une plage de pages
+  /// consécutives) et les transcriptions sont concaténées dans l'ordre.
+  /// [onBatchProgress] est appelé après chaque lot envoyé (lot courant,
+  /// nombre total de lots), utile pour afficher une progression à l'écran.
   Future<String> extractNotesFromFrames({
+    required List<String> framePaths,
+    required String systemPrompt,
+    required String userPrompt,
+    void Function(int batchIndex, int totalBatches)? onBatchProgress,
+  }) async {
+    final batches = <List<String>>[];
+    for (var i = 0; i < framePaths.length; i += maxFramesPerRequest) {
+      batches.add(framePaths.sublist(
+        i,
+        (i + maxFramesPerRequest).clamp(0, framePaths.length),
+      ));
+    }
+
+    final transcriptions = <String>[];
+    for (var i = 0; i < batches.length; i++) {
+      transcriptions.add(await _extractNotesFromBatch(
+        framePaths: batches[i],
+        systemPrompt: systemPrompt,
+        userPrompt: userPrompt,
+      ));
+      onBatchProgress?.call(i + 1, batches.length);
+    }
+
+    return transcriptions.join('\n\n');
+  }
+
+  Future<String> _extractNotesFromBatch({
     required List<String> framePaths,
     required String systemPrompt,
     required String userPrompt,
@@ -54,7 +95,7 @@ class ClaudeApiService {
         'type': 'image',
         'source': {
           'type': 'base64',
-          'media_type': 'image/png',
+          'media_type': 'image/jpeg',
           'data': base64Encode(bytes),
         },
       });

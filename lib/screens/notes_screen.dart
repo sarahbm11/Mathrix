@@ -89,10 +89,7 @@ class _ChapterDetailScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: Text(chapter.chapterName)),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16),
-        child: MarkdownMathView(text: chapter.content),
-      ),
+      body: MarkdownMathListView(text: chapter.content),
     );
   }
 }

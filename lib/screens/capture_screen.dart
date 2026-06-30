@@ -4,11 +4,13 @@ import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 
+import '../models/cost_estimate.dart';
 import '../models/note_chapter.dart';
 import '../prompts/extraction_prompt.dart';
 import '../prompts/tutor_system_prompt.dart' show tutorSystemPrompt;
 import '../providers/app_state_provider.dart';
 import '../services/claude_api_service.dart';
+import '../services/cost_estimator_service.dart';
 import '../services/notes_storage_service.dart';
 import '../services/video_frame_service.dart';
 import '../widgets/markdown_math_view.dart';
@@ -26,6 +28,7 @@ class _CaptureScreenState extends State<CaptureScreen> {
   final _frameService = VideoFrameService();
   final _api = ClaudeApiService();
   final _notesStorage = NotesStorageService();
+  final _costEstimator = CostEstimatorService();
   final _chapterController = TextEditingController();
 
   _Step _step = _Step.pickVideo;
@@ -33,7 +36,9 @@ class _CaptureScreenState extends State<CaptureScreen> {
   List<String> _frames = [];
   String? _extractedMarkdown;
   String? _error;
+  String? _batchProgress;
   Course _selectedCourse = Course.nya;
+  CostEstimate? _costEstimate;
 
   @override
   void dispose() {
@@ -62,8 +67,14 @@ class _CaptureScreenState extends State<CaptureScreen> {
     try {
       final raw = await _frameService.extractFrames(_videoPath!);
       final deduped = await _frameService.deduplicateFrames(raw);
+      final estimate = await _costEstimator.estimateExtractionCost(
+        framePaths: deduped,
+        systemPrompt: tutorSystemPrompt,
+        userPrompt: extractionPrompt,
+      );
       setState(() {
         _frames = deduped;
+        _costEstimate = estimate;
         _step = _Step.reviewFrames;
       });
     } catch (e) {
@@ -80,6 +91,7 @@ class _CaptureScreenState extends State<CaptureScreen> {
     setState(() {
       _step = _Step.extracting;
       _error = null;
+      _batchProgress = null;
     });
 
     try {
@@ -87,6 +99,11 @@ class _CaptureScreenState extends State<CaptureScreen> {
         framePaths: _frames,
         systemPrompt: tutorSystemPrompt,
         userPrompt: extractionPrompt,
+        onBatchProgress: (batchIndex, totalBatches) {
+          if (totalBatches > 1) {
+            setState(() => _batchProgress = '$batchIndex / $totalBatches');
+          }
+        },
       );
       await _notesStorage.saveChapter(
         course: _selectedCourse,
@@ -112,6 +129,7 @@ class _CaptureScreenState extends State<CaptureScreen> {
       _frames = [];
       _extractedMarkdown = null;
       _error = null;
+      _costEstimate = null;
       _chapterController.clear();
     });
   }
@@ -170,13 +188,34 @@ class _CaptureScreenState extends State<CaptureScreen> {
         );
 
       case _Step.extracting:
-        return const Center(child: CircularProgressIndicator());
+        return Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const CircularProgressIndicator(),
+              if (_batchProgress != null) ...[
+                const SizedBox(height: 12),
+                Text('Lot $_batchProgress envoyé'),
+              ],
+            ],
+          ),
+        );
 
       case _Step.reviewFrames:
+        final estimate = _costEstimate;
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Text('${_frames.length} frames retenues après déduplication.'),
+            if (estimate != null) ...[
+              const SizedBox(height: 4),
+              Text(
+                'Coût estimé : ~${estimate.estimatedCostUsd.toStringAsFixed(2)} \$ '
+                '(${estimate.batchCount} requête${estimate.batchCount > 1 ? 's' : ''} à l\'API, '
+                'estimation approximative)',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ],
             const SizedBox(height: 8),
             Expanded(
               child: GridView.builder(
@@ -184,7 +223,10 @@ class _CaptureScreenState extends State<CaptureScreen> {
                   crossAxisCount: 3,
                 ),
                 itemCount: _frames.length,
-                itemBuilder: (context, i) => Image.file(File(_frames[i])),
+                itemBuilder: (context, i) => Image.file(
+                  File(_frames[i]),
+                  fit: BoxFit.cover,
+                ),
               ),
             ),
             const SizedBox(height: 12),
@@ -204,7 +246,9 @@ class _CaptureScreenState extends State<CaptureScreen> {
             ElevatedButton(
               onPressed: _confirmAndSendToApi,
               child: Text(
-                'Envoyer ${_frames.length} frames à Claude pour extraction',
+                estimate == null
+                    ? 'Envoyer ${_frames.length} frames à Claude pour extraction'
+                    : 'Envoyer ${_frames.length} frames (~${estimate.estimatedCostUsd.toStringAsFixed(2)} \$)',
               ),
             ),
           ],
@@ -217,8 +261,9 @@ class _CaptureScreenState extends State<CaptureScreen> {
             const Text('Notes extraites et sauvegardées.'),
             const SizedBox(height: 8),
             Expanded(
-              child: SingleChildScrollView(
-                child: MarkdownMathView(text: _extractedMarkdown ?? ''),
+              child: MarkdownMathListView(
+                text: _extractedMarkdown ?? '',
+                padding: EdgeInsets.zero,
               ),
             ),
             const SizedBox(height: 12),
